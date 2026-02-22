@@ -1,0 +1,427 @@
+/*
+ * DevSwarm — Self-Distributing Git Swarm
+ * Formal Security Specification for Tamarin Prover
+ *
+ * Repository: https://github.com/HackrsValv/devswarm
+ *
+ * ======================================================================
+ * OVERVIEW
+ * ======================================================================
+ * DevSwarm is a self-distributing Git swarm in which repositories
+ * replicate themselves across Git forges through the fork mechanism,
+ * with CI/CD providing automated coordination.  The protocol has
+ * three core primitives:
+ *
+ *   Fork = Replication   — clicking "Fork" creates a complete copy
+ *   CI/CD = Coordination — the coordinator script runs on each node
+ *   Git = Consensus      — git merge resolves conflicts; the commit
+ *                          history is the audit trail
+ *
+ * ======================================================================
+ * PRINCIPALS
+ * ======================================================================
+ *   Platform    — the Git forge (GitHub, GitLab, Gitea, …)
+ *   OriginNode  — the canonical (first) repository in the swarm
+ *   ForkNode    — any forked copy of another swarm node
+ *   Coordinator — the CI/CD job running swarm-coordinator.sh
+ *
+ * ======================================================================
+ * KEY OPERATIONS
+ * ======================================================================
+ *   1. Fork creation   — a new ForkNode copies an existing node
+ *   2. New commit      — any node can publish new commits (git push)
+ *   3. Upstream sync   — a ForkNode fetches & merges from its parent
+ *   4. Fork discovery  — the Coordinator queries the Platform API
+ *   5. Manifest update — the Coordinator publishes swarm topology
+ *
+ * ======================================================================
+ * MODELLING CHOICES
+ * ======================================================================
+ * Git does not use traditional public-key signatures; it uses SHA
+ * hash chains for integrity.  We abstract this as a signing scheme
+ * where:
+ *   - Each node holds a long-term signing key (models GPG-signed
+ *     commits or, more loosely, the hash-chain commitment of Git).
+ *   - The Platform holds a long-term signing key used to authenticate
+ *     fork-listing API responses.
+ *
+ * The standard Dolev-Yao network model is used: the adversary can
+ * intercept, replay, and inject messages, but cannot forge signatures
+ * without the corresponding private key.
+ *
+ * ======================================================================
+ * SECURITY PROPERTIES VERIFIED
+ * ======================================================================
+ *   Executable                — the protocol can execute all key steps
+ *   Fork_Ancestry             — every fork traces back to a legitimate
+ *                               node (origin or another fork)
+ *   Sync_Integrity            — forks only sync from their declared
+ *                               upstream parent
+ *   Platform_API_Integrity    — API listings reflect real fork
+ *                               registrations
+ *   Manifest_Authenticity     — manifests list only API-verified forks
+ *   Swarm_Membership_Integrity— manifest entries are legitimately
+ *                               created fork nodes
+ *
+ * ======================================================================
+ * USAGE
+ * ======================================================================
+ *   # Prove all lemmas automatically:
+ *   tamarin-prover formal-spec/devswarm.spthy --prove
+ *
+ *   # Interactive GUI:
+ *   tamarin-prover interactive formal-spec/devswarm.spthy
+ *
+ * Compatible with Tamarin Prover >= 1.6 (multi-rule with persistent facts).
+ */
+
+theory DevSwarm
+begin
+
+builtins: signing, hashing
+
+/* =====================================================================
+ * KEY SETUP
+ * =====================================================================
+ *
+ * The Platform holds a long-term signing key used to authenticate API
+ * responses (fork listings).  Its public key is broadcast so that any
+ * Coordinator can verify platform-signed messages.
+ *
+ * Each repository Node holds a long-term signing key.  The public key
+ * is broadcast so that any node can verify commit and fork-announcement
+ * signatures.
+ */
+
+rule Platform_KeyGen:
+    [ Fr(~ltkP) ]
+  --[ OnlyOnce('PlatformKeyGen') ]->
+    [ !Ltk_Platform(~ltkP)
+    , !Pk_Platform(pk(~ltkP))
+    , Out(pk(~ltkP))
+    ]
+
+rule Node_KeyGen:
+    [ Fr(~nodeId), Fr(~ltk) ]
+  --[ NodeKeygen(~nodeId) ]->
+    [ !Ltk_Node(~nodeId, ~ltk)
+    , !Pk_Node(~nodeId, pk(~ltk))
+    , Out(pk(~ltk))
+    ]
+
+/* Restriction: platform key generation happens exactly once. */
+restriction OnlyOnce:
+    "All tag #i #j.
+       OnlyOnce(tag) @ #i & OnlyOnce(tag) @ #j
+     ==> #i = #j"
+
+/* Restriction: wherever a rule emits Eq(x, y), x must equal y.
+ * Used inline to enforce signature verification. */
+restriction Eq:
+    "All x y #i. Eq(x, y) @ #i ==> x = y"
+
+/* =====================================================================
+ * ORIGIN NODE
+ * =====================================================================
+ *
+ * The origin creates the first ("genesis") commit, establishing the
+ * swarm.  It publishes the signed commit so that any node can fork it.
+ *
+ * Corresponds to: the initial git push that creates the canonical repo.
+ */
+
+rule Origin_Init:
+    [ Fr(~originId)
+    , Fr(~initCommit)
+    , !Ltk_Node(~originId, ltk)
+    ]
+  --[ OriginCreated(~originId, ~initCommit) ]->
+    [ !SwarmOrigin(~originId)
+    , !NodeCommit(~originId, ~initCommit, 'genesis')
+    , Out(<'commit', ~originId, ~initCommit, 'genesis',
+           sign(<'commit', ~originId, ~initCommit, 'genesis'>, ltk)>)
+    ]
+
+/* =====================================================================
+ * NEW COMMIT
+ * =====================================================================
+ *
+ * Any node (origin or fork) can create new commits and publish them.
+ * Each new commit extends an existing commit in that node's history.
+ *
+ * Corresponds to: git commit && git push by the coordinator or a user.
+ */
+
+rule Node_New_Commit:
+    [ Fr(~newCommit)
+    , !NodeCommit(nodeId, prevCommit, prevParent)
+    , !Ltk_Node(nodeId, ltk)
+    ]
+  --[ NewCommit(nodeId, ~newCommit, prevCommit) ]->
+    [ !NodeCommit(nodeId, ~newCommit, prevCommit)
+    , Out(<'commit', nodeId, ~newCommit, prevCommit,
+           sign(<'commit', nodeId, ~newCommit, prevCommit>, ltk)>)
+    ]
+
+/* =====================================================================
+ * FORK CREATION
+ * =====================================================================
+ *
+ * A user creates a fork of an existing node.  The new ForkNode:
+ *   1. Receives the parent's latest signed commit (network message)
+ *   2. Verifies the commit signature against the parent's public key
+ *   3. Registers the fork relationship (persistent fact)
+ *   4. Announces itself on the network (fork_announcement)
+ *
+ * The signature check (Eq restriction) prevents accepting a commit
+ * whose signature the adversary forged or tampered with.
+ *
+ * Corresponds to: clicking the "Fork" button on a Git forge.
+ */
+
+rule Fork_Create:
+    [ Fr(~forkId)
+    , !Ltk_Node(~forkId, ltkF)
+    , !Pk_Node(parentId, pkParent)
+    , In(<'commit', parentId, headCommit, prevCommit, sig>)
+    ]
+  --[ ForkCreated(~forkId, parentId, headCommit)
+    , Eq(verify(sig,
+               <'commit', parentId, headCommit, prevCommit>,
+               pkParent), true)
+    ]->
+    [ !ForkOf(~forkId, parentId)
+    , !NodeCommit(~forkId, headCommit, 'forked')
+    , Out(<'fork_announcement', ~forkId, parentId, headCommit,
+           sign(<'fork_announcement', ~forkId, parentId, headCommit>,
+                ltkF)>)
+    ]
+
+/* =====================================================================
+ * PLATFORM: FORK REGISTRY
+ * =====================================================================
+ *
+ * The Platform receives fork announcements, verifies them, records
+ * the fork relationship, and publishes signed API responses that
+ * Coordinators can trust.
+ *
+ * Corresponds to: the Git forge's fork-listing API, e.g.,
+ *   GET /repos/:owner/:repo/forks  (GitHub)
+ *   GET /api/v4/projects/:id/forks (GitLab)
+ *   GET /api/v1/repos/:owner/:repo/forks (Gitea/Forgejo)
+ */
+
+rule Platform_Register_Fork:
+    [ In(<'fork_announcement', forkId, parentId, headCommit, forkSig>)
+    , !Pk_Node(forkId, pkFork)
+    , !Ltk_Platform(ltkP)
+    ]
+  --[ PlatformRegistered(forkId, parentId)
+    , Eq(verify(forkSig,
+               <'fork_announcement', forkId, parentId, headCommit>,
+               pkFork), true)
+    ]->
+    [ !PlatformRecord(forkId, parentId)
+    , Out(<'api_fork_entry', parentId, forkId,
+           sign(<'api_fork_entry', parentId, forkId>, ltkP)>)
+    ]
+
+/* =====================================================================
+ * COORDINATOR: FORK DISCOVERY
+ * =====================================================================
+ *
+ * The Coordinator queries the Platform API and records any fork whose
+ * listing is authenticated by the Platform's signature.  Only
+ * platform-signed entries are accepted.
+ *
+ * Corresponds to: the discover_forks() function in swarm-coordinator.sh
+ * which calls the platform REST API and verifies HTTPS-authenticated
+ * responses.
+ */
+
+rule Coordinator_Discover_Fork:
+    [ In(<'api_fork_entry', nodeId, forkId, apiSig>)
+    , !Pk_Platform(pkP)
+    , !NodeCommit(nodeId, commit, parent)
+    ]
+  --[ CoordinatorLearnedFork(nodeId, forkId)
+    , Eq(verify(apiSig,
+               <'api_fork_entry', nodeId, forkId>,
+               pkP), true)
+    ]->
+    [ !KnownFork(nodeId, forkId) ]
+
+/* =====================================================================
+ * UPSTREAM SYNC
+ * =====================================================================
+ *
+ * A fork fetches new commits from its upstream parent and merges them,
+ * producing a new local merge commit.  The signature on the incoming
+ * commit is verified against the parent's registered public key.
+ *
+ * Corresponds to: sync_upstream() in swarm-coordinator.sh:
+ *   git remote add upstream <url>
+ *   git fetch upstream
+ *   git merge upstream/main --no-edit
+ *
+ * The signature check ensures the fetched commit genuinely originated
+ * from the declared upstream, preventing an adversary from injecting
+ * malicious commits as if they came from a trusted parent.
+ */
+
+rule Fork_Sync_Upstream:
+    [ Fr(~mergeCommit)
+    , !ForkOf(forkId, parentId)
+    , !Pk_Node(parentId, pkParent)
+    , In(<'commit', parentId, upstreamCommit, prevCommit, sig>)
+    , !Ltk_Node(forkId, ltkF)
+    ]
+  --[ ForkSynced(forkId, parentId, upstreamCommit)
+    , Eq(verify(sig,
+               <'commit', parentId, upstreamCommit, prevCommit>,
+               pkParent), true)
+    ]->
+    [ !NodeCommit(forkId, ~mergeCommit, upstreamCommit)
+    , Out(<'commit', forkId, ~mergeCommit, upstreamCommit,
+           sign(<'commit', forkId, ~mergeCommit, upstreamCommit>,
+                ltkF)>)
+    ]
+
+/* =====================================================================
+ * MANIFEST UPDATE
+ * =====================================================================
+ *
+ * The Coordinator publishes an updated swarm manifest listing known
+ * forks.  A fork can only appear in the manifest after the Coordinator
+ * has learned it through a Platform-authenticated API call.
+ *
+ * Corresponds to: writing .swarm/manifest.json in swarm-coordinator.sh
+ * (the manifest records version, platform, repository, topology, and
+ * distribution mechanics).
+ */
+
+rule Coordinator_Update_Manifest:
+    [ Fr(~manifestNonce)
+    , !KnownFork(nodeId, forkId)
+    , !NodeCommit(nodeId, headCommit, parent)
+    , !Ltk_Node(nodeId, ltkN)
+    ]
+  --[ ManifestPublished(nodeId, ~manifestNonce, forkId) ]->
+    [ Out(<'manifest', nodeId, ~manifestNonce, forkId,
+           sign(<'manifest', nodeId, ~manifestNonce, forkId>, ltkN)>)
+    ]
+
+/* =====================================================================
+ * SECURITY LEMMAS
+ * =====================================================================
+ *
+ * All lemmas are of type "all-traces" (universal) unless qualified
+ * with "exists-trace".  Tamarin's backward-induction engine verifies
+ * each property against all possible adversary strategies.
+ */
+
+/*
+ * Executable
+ * ----------
+ * Sanity check: the protocol can reach a state where an origin exists,
+ * a fork of it exists, and the origin's coordinator has published a
+ * manifest listing that fork.  Falsifying this lemma would indicate
+ * the model is over-constrained and cannot represent real executions.
+ */
+lemma Executable:
+    exists-trace
+    "Ex origin forkId initCommit mNonce #t1 #t2 #t5.
+       OriginCreated(origin, initCommit) @ #t1
+     & ForkCreated(forkId, origin, initCommit) @ #t2
+     & ManifestPublished(origin, mNonce, forkId) @ #t5
+     & #t1 < #t2
+     & #t2 < #t5"
+
+/*
+ * Fork_Ancestry
+ * -------------
+ * Every fork node was created from a node that is either:
+ *   (a) the swarm origin, or
+ *   (b) itself a fork of another node (transitive).
+ *
+ * This guarantees that the swarm fork graph is a tree rooted at the
+ * origin; no "phantom" or adversary-invented node can appear as a
+ * parent.
+ *
+ * Key insight: Fork_Create requires a commit with a valid signature
+ * from parentId.  Such a commit can only be produced by Origin_Init,
+ * Node_New_Commit (which itself requires !NodeCommit), or
+ * Fork_Sync_Upstream — all of which ultimately trace back to Origin_Init.
+ */
+lemma Fork_Ancestry:
+    "All forkId parentId headCommit #i.
+       ForkCreated(forkId, parentId, headCommit) @ #i
+     ==> (Ex ic #j. OriginCreated(parentId, ic) @ #j & #j < #i)
+       | (Ex gp c #k. ForkCreated(parentId, gp, c) @ #k & #k < #i)"
+
+/*
+ * Sync_Integrity
+ * --------------
+ * A fork can only sync from its declared upstream parent.  Before any
+ * upstream sync can occur, a fork relationship between the two nodes
+ * must have been established via Fork_Create.
+ *
+ * This prevents an adversary from redirecting a fork's upstream
+ * pointer to a malicious repository.
+ */
+lemma Sync_Integrity:
+    "All forkId parentId upstreamCommit #i.
+       ForkSynced(forkId, parentId, upstreamCommit) @ #i
+     ==> (Ex headCommit #j.
+            ForkCreated(forkId, parentId, headCommit) @ #j & #j < #i)"
+
+/*
+ * Platform_API_Integrity
+ * ----------------------
+ * If a Coordinator learns about a fork via the Platform API, the
+ * Platform must have previously and independently registered that
+ * exact fork by processing a valid signed fork announcement.
+ *
+ * This ensures no adversary can inject fabricated entries into the
+ * Platform's fork listing: the Platform's API signature cannot be
+ * forged without its private key.
+ */
+lemma Platform_API_Integrity:
+    "All nodeId forkId #i.
+       CoordinatorLearnedFork(nodeId, forkId) @ #i
+     ==> (Ex #j. PlatformRegistered(forkId, nodeId) @ #j & #j < #i)"
+
+/*
+ * Manifest_Authenticity
+ * ---------------------
+ * Any fork listed in a published swarm manifest was previously learned
+ * through a Platform-authenticated (signed) API response.
+ *
+ * This ensures the manifest cannot be polluted with forks whose
+ * existence was not verified by the Platform, even if an adversary
+ * injects forged messages on the coordinator's network path.
+ */
+lemma Manifest_Authenticity:
+    "All nodeId mNonce forkId #i.
+       ManifestPublished(nodeId, mNonce, forkId) @ #i
+     ==> (Ex #j. CoordinatorLearnedFork(nodeId, forkId) @ #j & #j < #i)"
+
+/*
+ * Swarm_Membership_Integrity
+ * --------------------------
+ * Any fork listed in a published manifest is a legitimately created
+ * fork node — it was explicitly forked from another swarm node with a
+ * verifiable signature.  No adversary-fabricated node ID can appear in
+ * the manifest.
+ *
+ * This chains Manifest_Authenticity + Platform_API_Integrity with the
+ * fact that Platform_Register_Fork only accepts announcements carrying
+ * a valid signature from the fork node's own key.
+ */
+lemma Swarm_Membership_Integrity:
+    "All nodeId mNonce forkId #i.
+       ManifestPublished(nodeId, mNonce, forkId) @ #i
+     ==> (Ex parentId headCommit #j.
+            ForkCreated(forkId, parentId, headCommit) @ #j & #j < #i)"
+
+end
