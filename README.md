@@ -478,12 +478,37 @@ git commit
 git push
 ```
 
+## Formal Security Specification
+
+The `formal-spec/` directory contains a [Tamarin Prover](https://tamarin-prover.github.io/)
+security protocol theory (`devswarm.spthy`) that formally models the
+DevSwarm coordination protocol and proves its key security properties:
+
+| Property | Description |
+|----------|-------------|
+| **Fork Ancestry** | Every swarm node traces back to the origin through a chain of legitimate forks — no phantom nodes |
+| **Sync Integrity** | A fork only syncs commits from its declared upstream parent |
+| **Platform API Integrity** | Fork listings from the platform reflect genuine, registered forks |
+| **Manifest Authenticity** | The swarm manifest lists only platform-verified forks |
+| **Swarm Membership Integrity** | Every manifest entry is a legitimately created fork node |
+
+```bash
+# Prove all security properties:
+tamarin-prover formal-spec/devswarm.spthy --prove
+
+# Interactive exploration:
+tamarin-prover interactive formal-spec/devswarm.spthy
+```
+
+See [formal-spec/README.md](formal-spec/README.md) for full documentation.
+
 ## Roadmap
 
 - [x] Cross-platform support (tool #3) ✅ DONE
 - [x] Bootstrap CLI (tool #1) ✅ DONE
 - [x] Visualization dashboard (tool #2) ✅ DONE
 - [x] Pair programming editor ✅ DONE (2025-12-12)
+- [x] Formal Tamarin specification ✅ DONE
 - [ ] IPFS fragment storage ← NEXT (Week 1)
 - [ ] Erasure coding (k=6, m=3) ← NEXT (Week 1)
 - [ ] Age encryption for fragments ← NEXT (Week 1)
