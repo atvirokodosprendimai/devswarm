@@ -78,7 +78,7 @@
 theory DevSwarm
 begin
 
-builtins: signing, hashing
+builtins: signing
 
 /* =====================================================================
  * KEY SETUP
@@ -128,18 +128,22 @@ restriction Eq:
  * swarm.  It publishes the signed commit so that any node can fork it.
  *
  * Corresponds to: the initial git push that creates the canonical repo.
+ *
+ * Note: originId is an unbound variable (no ~ prefix) that unifies with
+ * any existing node ID produced by Node_KeyGen.  Only ~initCommit is
+ * freshly generated here.  This is the same pattern used by
+ * Node_New_Commit and Fork_Sync_Upstream for their nodeId variables.
  */
 
 rule Origin_Init:
-    [ Fr(~originId)
-    , Fr(~initCommit)
-    , !Ltk_Node(~originId, ltk)
+    [ Fr(~initCommit)
+    , !Ltk_Node(originId, ltk)
     ]
-  --[ OriginCreated(~originId, ~initCommit) ]->
-    [ !SwarmOrigin(~originId)
-    , !NodeCommit(~originId, ~initCommit, 'genesis')
-    , Out(<'commit', ~originId, ~initCommit, 'genesis',
-           sign(<'commit', ~originId, ~initCommit, 'genesis'>, ltk)>)
+  --[ OriginCreated(originId, ~initCommit) ]->
+    [ !SwarmOrigin(originId)
+    , !NodeCommit(originId, ~initCommit, 'genesis')
+    , Out(<'commit', originId, ~initCommit, 'genesis',
+           sign(<'commit', originId, ~initCommit, 'genesis'>, ltk)>)
     ]
 
 /* =====================================================================
@@ -177,23 +181,26 @@ rule Node_New_Commit:
  * whose signature the adversary forged or tampered with.
  *
  * Corresponds to: clicking the "Fork" button on a Git forge.
+ *
+ * Note: forkId is an unbound variable (no ~ prefix) that unifies with
+ * any existing node ID produced by Node_KeyGen.  The fork node's key
+ * pair must be set up by Node_KeyGen before Fork_Create fires.
  */
 
 rule Fork_Create:
-    [ Fr(~forkId)
-    , !Ltk_Node(~forkId, ltkF)
+    [ !Ltk_Node(forkId, ltkF)
     , !Pk_Node(parentId, pkParent)
     , In(<'commit', parentId, headCommit, prevCommit, sig>)
     ]
-  --[ ForkCreated(~forkId, parentId, headCommit)
+  --[ ForkCreated(forkId, parentId, headCommit)
     , Eq(verify(sig,
                <'commit', parentId, headCommit, prevCommit>,
                pkParent), true)
     ]->
-    [ !ForkOf(~forkId, parentId)
-    , !NodeCommit(~forkId, headCommit, 'forked')
-    , Out(<'fork_announcement', ~forkId, parentId, headCommit,
-           sign(<'fork_announcement', ~forkId, parentId, headCommit>,
+    [ !ForkOf(forkId, parentId)
+    , !NodeCommit(forkId, headCommit, 'forked')
+    , Out(<'fork_announcement', forkId, parentId, headCommit,
+           sign(<'fork_announcement', forkId, parentId, headCommit>,
                 ltkF)>)
     ]
 
