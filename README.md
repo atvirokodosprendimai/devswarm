@@ -4,6 +4,8 @@
 
 A Git repository that distributes and replicates itself across any Git forge using only standard Git features and CI/CD.
 
+Read the story continuation: [STORY.md](STORY.md)
+
 ## Quick Start
 
 ### Join an Existing Swarm (Recommended)
