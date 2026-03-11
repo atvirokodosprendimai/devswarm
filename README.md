@@ -565,6 +565,7 @@ Bootstrap from any of these. This list updates as the swarm syncs.
 | Fork | Platform | Status |
 |------|----------|--------|
 | [HackrsValv/devswarm](https://github.com/HackrsValv/devswarm) | Github | Origin |
+| [atvirokodosprendimai/devswarm](https://github.com/atvirokodosprendimai/devswarm) | Github | Fork |
 | [nycterent/devswarm](https://github.com/nycterent/devswarm) | Github | Fork |
 <!-- SWARM_FORKS_END -->
 
