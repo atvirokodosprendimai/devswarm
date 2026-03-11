@@ -564,9 +564,7 @@ Bootstrap from any of these. This list updates as the swarm syncs.
 <!-- SWARM_FORKS_START -->
 | Fork | Platform | Status |
 |------|----------|--------|
-| [HackrsValv/devswarm](https://github.com/HackrsValv/devswarm) | Github | Origin |
-| [atvirokodosprendimai/devswarm](https://github.com/atvirokodosprendimai/devswarm) | Github | Fork |
-| [nycterent/devswarm](https://github.com/nycterent/devswarm) | Github | Fork |
+| [atvirokodosprendimai/devswarm](https://github.com/atvirokodosprendimai/devswarm) | Github | Origin |
 <!-- SWARM_FORKS_END -->
 
 > **Your fork not listed?** It will appear after the next swarm sync cycle (runs every 6 hours).

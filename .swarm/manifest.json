@@ -2,16 +2,13 @@
   "version": "1.0.0",
   "platform": "github",
   "forge_host": "github.com",
-  "repository": "HackrsValv/devswarm",
-  "node_id": "ae771d83a2803dd6",
-  "updated_at": "2026-03-11T18:46:42Z",
+  "repository": "atvirokodosprendimai/devswarm",
+  "node_id": "7113302e71bae270",
+  "updated_at": "2026-03-11T18:58:22Z",
   "swarm_topology": {
-    "fork_count": 2,
+    "fork_count": 0,
     "health": "degraded",
-    "forks": [
-      "atvirokodosprendimai/devswarm",
-      "nycterent/devswarm"
-    ]
+    "forks": []
   },
   "distribution_mechanics": {
     "method": "fork-native",
